@@ -131,7 +131,7 @@ def main() -> int:
         except Exception as exc:
             LOGGER.error("Failed to sync %s: %s", path, exc)
             failures.append(path)
-    if synced:
+    if synced or notion.index_stale:
         notion.write_index(index)
         LOGGER.info("Topic index updated (%s tags, %s pages)",
                     sum(1 for pages in index.values() if pages),

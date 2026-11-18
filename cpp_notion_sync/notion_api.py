@@ -196,7 +196,8 @@ class NotionClient:
             "Notion-Version": NOTION_VERSION,
             "Content-Type": "application/json",
         })
-        self._pages: dict[str, str] | None = None
+        self._pages: list[dict[str, str]] | None = None
+        self.index_stale = False
 
     def _request(self, method: str, endpoint: str, **kwargs: Any) -> dict[str, Any]:
         # Only retry 429/529, where Notion explicitly asks clients to wait.
@@ -311,12 +312,17 @@ class NotionClient:
         """Rebuild tag -> page ids from the index already on the parent page."""
         index: dict[str, list[str]] = {}
         tag: str | None = None
+        self.index_stale = False
         for child in self.list_children(self.parent_id):
             kind = child.get("type")
             if kind == "heading_1" and plain_text(child["heading_1"]["rich_text"]) == INDEX_TITLE:
                 tag = None
             elif kind == "heading_2":
-                tag = tag_of(plain_text(child["heading_2"]["rich_text"]))
+                label = plain_text(child["heading_2"]["rich_text"])
+                tag = tag_of(label)
+                if tag_label(tag) != label:
+                    # Emoji/format table changed: the headings need a rewrite.
+                    self.index_stale = True
                 index.setdefault(tag, [])
             elif kind == "bulleted_list_item" and tag:
                 page_id = mention_page_id(child["bulleted_list_item"]["rich_text"])
