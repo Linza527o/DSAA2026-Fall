@@ -1,0 +1,25 @@
+# Build artifacts
+*.exe
+*.obj
+*.ilk
+*.pdb
+*.o
+*.out
+*.dll
+*.lib
+*.exp
+
+# IDE / editor
+.idea/
+.vscode/
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.*
+
+# Obsidian
+.obsidian/
+
+# OS
+.DS_Store
+Thumbs.db
