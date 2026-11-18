@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .ai_notes import DEFAULT_MODEL, fingerprint, generate_note
 from .git_utils import changed_files, file_diff, is_valid_file
-from .notion_api import NotionClient, generated_blocks
+from .notion_api import NotionClient, generated_blocks, page_title
 
 LOGGER = logging.getLogger(__name__)
 
@@ -114,8 +114,11 @@ def main() -> int:
             blocks = generated_blocks(report=note.data, code=code, path=path,
                                       repo=repo, commit=after, model=model,
                                       truncated=note.truncated)
+            title = page_title(repo, path, note.data.get("topic", ""))
             if page_id is None:
-                page_id = notion.create_page(repo, path)
+                page_id = notion.create_page(title)
+            elif notion.set_title(page_id, title):
+                LOGGER.info("Retitled %s -> %s", path, title)
             notion.write_generated(page_id, version, blocks)
             LOGGER.info("Synced %s to https://www.notion.so/%s", path, page_id.replace("-", ""))
         except Exception as exc:

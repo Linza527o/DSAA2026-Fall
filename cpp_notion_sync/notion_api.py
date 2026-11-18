@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import random
+import re
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -16,6 +17,7 @@ API_URL = "https://api.notion.com/v1"
 NOTION_VERSION = "2026-03-11"
 MANAGED_PREFIX = "AI C++ Notes | "
 COMPLETION_PREFIX = "SYNC_COMPLETE:"
+MARKER_RE = re.compile(r"\[cpp-sync:[0-9a-f]{16}\]")
 TEXT_CHUNK = 1800
 BLOCK_BATCH = 40
 MAX_BULLETS = 6
@@ -59,8 +61,12 @@ def generated_blocks(*, report: dict[str, Any], code: str, path: str,
     repository_url = f"https://github.com/{repo}"
     file_url = f"{repository_url}/blob/{commit}/{quote(path, safe='/')}"
     commit_url = f"{repository_url}/commit/{commit}"
+    topic = " ".join(str(report.get("topic", "")).split())[:40]
+    meta = f"文件：{path}  |  仓库：{repo}  |  模型：{model}  |  提交：{commit[:12]}"
+    if topic:
+        meta = f"主题：{topic}  |  " + meta
     content: list[dict[str, Any]] = [
-        block("paragraph", f"仓库：{repo}  |  文件：{path}  |  模型：{model}  |  提交：{commit[:12]}"),
+        block("paragraph", meta),
         link_paragraph("在 GitHub 查看此版本的源代码", file_url),
         link_paragraph("查看对应 Git Commit", commit_url),
         block("heading_2", "一句话概述"),
@@ -106,9 +112,19 @@ def file_key(repo: str, path: str) -> str:
     return hashlib.sha256(f"{repo}\0{path}".encode("utf-8")).hexdigest()[:16]
 
 
-def page_title(repo: str, path: str) -> str:
-    marker = f"[cpp-sync:{file_key(repo, path)}]"
-    return f"{path[:170]} {marker}"
+def page_marker(repo: str, path: str) -> str:
+    return f"[cpp-sync:{file_key(repo, path)}]"
+
+
+def page_title(repo: str, path: str, topic: str = "") -> str:
+    """Topic first so the Notion page list reads like a study index.
+
+    The trailing marker is the stable identity; the readable part may change.
+    """
+    marker = page_marker(repo, path)
+    topic = " ".join((topic or "").split())[:40]
+    readable = f"{topic} · {path[:120]}" if topic else path[:160]
+    return f"{readable} {marker}"
 
 
 class NotionClient:
@@ -160,26 +176,50 @@ class NotionClient:
             if not cursor:
                 raise RuntimeError("Notion pagination returned has_more without next_cursor")
 
-    def _index_parent_pages(self) -> dict[str, str]:
+    def _index_parent_pages(self) -> dict[str, dict[str, str]]:
+        """Map the stable [cpp-sync:...] marker to the page, not the whole title.
+
+        Titles now start with an AI topic and can be re-worded, so matching on
+        the full title would create duplicate pages after every rename.
+        """
         if self._pages is None:
-            pages = {}
+            pages: dict[str, dict[str, str]] = {}
             for child in self.list_children(self.parent_id):
                 if child.get("type") == "child_page":
-                    pages[child["child_page"]["title"]] = child["id"]
+                    title = child["child_page"]["title"]
+                    found = MARKER_RE.search(title)
+                    if found:
+                        pages[found.group(0)] = {"id": child["id"], "title": title}
             self._pages = pages
         return self._pages
 
     def find_page(self, repo: str, path: str) -> str | None:
-        return self._index_parent_pages().get(page_title(repo, path))
+        entry = self._index_parent_pages().get(page_marker(repo, path))
+        return entry["id"] if entry else None
 
-    def create_page(self, repo: str, path: str) -> str:
-        title = page_title(repo, path)
+    def _remember(self, title: str, page_id: str) -> None:
+        found = MARKER_RE.search(title)
+        if found:
+            self._index_parent_pages()[found.group(0)] = {"id": page_id, "title": title}
+
+    def create_page(self, title: str) -> str:
         data = self._request("POST", "/pages", json={
             "parent": {"type": "page_id", "page_id": self.parent_id},
             "properties": {"title": {"type": "title", "title": rich_text(title)}},
         })
-        self._index_parent_pages()[title] = data["id"]
+        self._remember(title, data["id"])
         return data["id"]
+
+    def set_title(self, page_id: str, title: str) -> bool:
+        """Rename only when the readable part actually changed."""
+        for entry in self._index_parent_pages().values():
+            if entry["id"] == page_id and entry["title"] == title:
+                return False
+        self._request("PATCH", f"/pages/{page_id}", json={
+            "properties": {"title": {"type": "title", "title": rich_text(title)}}
+        })
+        self._remember(title, page_id)
+        return True
 
     def managed_toggles(self, page_id: str) -> list[dict[str, Any]]:
         output = []
