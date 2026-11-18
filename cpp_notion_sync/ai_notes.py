@@ -145,12 +145,35 @@ def generate_note(*, path: str, repo: str, code: str, diff: str, commit: str,
         request["temperature"] = 0.2
 
     client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url=base_url, timeout=180.0)
-    try:
-        response = client.chat.completions.create(**request)
-    except Exception as exc:
-        raise RuntimeError(f"DeepSeek request failed ({model} @ {base_url}): {exc}") from exc
+    expected = field_names(detail)
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            parsed = _request_and_parse(client, request, expected, detail, max_tokens)
+        except (json.JSONDecodeError, ValueError) as exc:
+            # The model occasionally emits a slightly different key set or a
+            # malformed object; one cheap retry beats failing the whole file.
+            last_error = exc
+            LOGGER.warning("Retrying %s after malformed AI response (%s)", path, exc)
+            continue
+        break
+    else:
+        raise RuntimeError(f"AI returned unusable JSON twice: {last_error}")
+    parsed["topic"] = " ".join(parsed["topic"].split())[:40]
+    seen: list[str] = []
+    for tag in parsed["tags"]:
+        cleaned = " ".join(tag.split())[:12]
+        if cleaned and cleaned not in seen:
+            seen.append(cleaned)
+    parsed["tags"] = seen[:3]
+    return Analysis(data=parsed, truncated=truncated)
+
+
+def _request_and_parse(client: Any, request: dict[str, Any], expected: list[str],
+                       detail: str, max_tokens: int) -> dict[str, Any]:
+    response = client.chat.completions.create(**request)
     if not response.choices:
-        raise RuntimeError("DeepSeek returned no choices")
+        raise ValueError("DeepSeek returned no choices")
     finish = response.choices[0].finish_reason
     content = response.choices[0].message.content or ""
     usage = getattr(response, "usage", None)
@@ -160,23 +183,21 @@ def generate_note(*, path: str, repo: str, code: str, diff: str, commit: str,
                     getattr(usage, "prompt_tokens", "?"), hit,
                     getattr(usage, "completion_tokens", "?"), detail)
     if finish == "length":
-        raise RuntimeError(
-            f"DeepSeek output hit max_tokens={max_tokens}; raise DEEPSEEK_MAX_TOKENS")
+        raise ValueError(f"DeepSeek output hit max_tokens={max_tokens}; raise DEEPSEEK_MAX_TOKENS")
     if not content.strip():
-        raise RuntimeError(f"DeepSeek returned empty content (finish_reason={finish})")
+        raise ValueError(f"DeepSeek returned empty content (finish_reason={finish})")
     parsed = json.loads(_strip_fences(content))
-    expected = field_names(detail)
-    if set(parsed) != set(expected):
-        raise ValueError("AI returned unexpected/missing fields")
-    for name in expected:
-        valid = (isinstance(parsed[name], list) and all(isinstance(v, str) for v in parsed[name])) if name in ARRAY_FIELDS else isinstance(parsed[name], str)
+    if not isinstance(parsed, dict):
+        raise ValueError("AI returned a JSON value that is not an object")
+    missing = [name for name in expected if name not in parsed]
+    extra = [name for name in parsed if name not in expected]
+    if missing or extra:
+        LOGGER.warning("AI schema drift: missing=%s extra=%s", missing, extra)
+    # Tolerate a drifted key set: optional extras are dropped, absent strings or
+    # arrays default to empty instead of losing the whole file.
+    data = {name: parsed.get(name, [] if name in ARRAY_FIELDS else "") for name in expected}
+    for name, value in data.items():
+        valid = (isinstance(value, list) and all(isinstance(v, str) for v in value)) if name in ARRAY_FIELDS else isinstance(value, str)
         if not valid:
             raise ValueError(f"AI returned invalid field: {name}")
-    parsed["topic"] = " ".join(parsed["topic"].split())[:40]
-    seen: list[str] = []
-    for tag in parsed["tags"]:
-        cleaned = " ".join(tag.split())[:12]
-        if cleaned and cleaned not in seen:
-            seen.append(cleaned)
-    parsed["tags"] = seen[:3]
-    return Analysis(data=parsed, truncated=truncated)
+    return data
