@@ -11,7 +11,7 @@ from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
-PROMPT_VERSION = "cpp-study-notes-v4-deepseek"
+PROMPT_VERSION = "cpp-study-notes-v5-deepseek"
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
@@ -20,16 +20,16 @@ DEFAULT_MAX_TOKENS = 2048
 # Full schema. `lite` drops the four most expensive optional sections to cut
 # completion tokens (which cost ~4x input tokens on DeepSeek).
 FIELD_NAMES_FULL = [
-    "topic", "summary", "problem", "approach", "data_structures", "key_functions",
+    "topic", "tags", "summary", "problem", "approach", "data_structures", "key_functions",
     "correctness", "time_complexity", "space_complexity", "complexity_reason",
     "changes", "pitfalls", "improvements", "example",
 ]
 FIELD_NAMES_LITE = [
-    "topic", "summary", "problem", "approach", "data_structures", "key_functions",
+    "topic", "tags", "summary", "problem", "approach", "data_structures", "key_functions",
     "time_complexity", "space_complexity", "complexity_reason", "pitfalls",
 ]
 ARRAY_FIELDS = {"approach", "data_structures", "key_functions", "correctness",
-                "changes", "pitfalls", "improvements"}
+                "changes", "pitfalls", "improvements", "tags"}
 
 
 def field_names(detail: str) -> list[str]:
@@ -46,13 +46,15 @@ INSTRUCTIONS = """你是严格的 C++ 程序分析与算法教学助手。根据
 7. 对头文件、普通工具代码，不要硬凑算法题；数组可为空。
 8. 输出精练但足够作为未来复习笔记，避免复述源码。
 9. topic 用一个简短的中文短语概括这份代码的主题/算法（如「二分查找」「AVL 树旋转」「并查集」），便于在页面列表里一眼识别。
-10. 只输出一个 JSON 对象，不要输出 Markdown 代码块、解释或任何额外文字。"""
+10. tags 是 1-3 个粗粒度分类标签，用于在主题索引里分组，只能从词表选择：数组、链表、栈、队列、字符串、哈希表、树、二叉搜索树、堆、图、并查集、排序、二分查找、递归、分治、贪心、动态规划、回溯、搜索、数学、模拟。无法归类的代码用「其他」。
+11. 只输出一个 JSON 对象，不要输出 Markdown 代码块、解释或任何额外文字。"""
 
 # DeepSeek exposes OpenAI-compatible chat completions with JSON mode but no
 # `json_schema` strict structured outputs, so the schema is stated in the prompt
 # and the parsed JSON is validated in Python afterwards.
 FULL_ONLY_HINTS = {
     "topic": "不超过 16 个字的中文主题标签，例如 二分查找 / AVL 树旋转 / 并查集 / BFS 最短路；不要写文件名或 .cpp",
+    "tags": "1-3 个粗粒度分类标签，从固定词表里选（如 树 / 图 / 二分查找 / 排序），不要自造同义词",
     "correctness": "正确性推理要点",
     "changes": "本次 diff 的改动摘要",
     "improvements": "改进建议",
@@ -171,4 +173,10 @@ def generate_note(*, path: str, repo: str, code: str, diff: str, commit: str,
         if not valid:
             raise ValueError(f"AI returned invalid field: {name}")
     parsed["topic"] = " ".join(parsed["topic"].split())[:40]
+    seen: list[str] = []
+    for tag in parsed["tags"]:
+        cleaned = " ".join(tag.split())[:12]
+        if cleaned and cleaned not in seen:
+            seen.append(cleaned)
+    parsed["tags"] = seen[:3]
     return Analysis(data=parsed, truncated=truncated)

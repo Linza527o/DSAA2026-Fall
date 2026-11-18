@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .ai_notes import DEFAULT_MODEL, fingerprint, generate_note
 from .git_utils import changed_files, file_diff, is_valid_file
-from .notion_api import NotionClient, generated_blocks, page_title
+from .notion_api import NotionClient, generated_blocks, page_title, strip_marker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -88,6 +88,8 @@ def main() -> int:
             raise RuntimeError(f"Missing required secret: {var}")
 
     notion = NotionClient(os.environ["NOTION_TOKEN"], os.environ["NOTION_PARENT_PAGE_ID"])
+    index = notion.read_index()
+    synced = 0
     failures = []
     for path in updated:
         try:
@@ -104,6 +106,9 @@ def main() -> int:
                 previous = notion.managed_toggles(page_id)
                 if any(t["title"].endswith(version) and notion.is_complete(t["id"], version)
                        for t in previous):
+                    clean = strip_marker(notion.title_of(page_id))
+                    if notion.set_title(page_id, clean):
+                        LOGGER.info("Retitled %s -> %s", path, clean)
                     LOGGER.info("Unchanged source: %s", path)
                     continue
             LOGGER.info("Analyzing %s via %s", path, model)
@@ -120,10 +125,17 @@ def main() -> int:
             elif notion.set_title(page_id, title):
                 LOGGER.info("Retitled %s -> %s", path, title)
             notion.write_generated(page_id, version, blocks)
+            notion.record_index(index, page_id, note.data.get("tags", []))
+            synced += 1
             LOGGER.info("Synced %s to https://www.notion.so/%s", path, page_id.replace("-", ""))
         except Exception as exc:
             LOGGER.error("Failed to sync %s: %s", path, exc)
             failures.append(path)
+    if synced:
+        notion.write_index(index)
+        LOGGER.info("Topic index updated (%s tags, %s pages)",
+                    sum(1 for pages in index.values() if pages),
+                    len({page for pages in index.values() for page in pages}))
     if failures:
         LOGGER.error("Failed files: %s", ", ".join(failures))
         return 1

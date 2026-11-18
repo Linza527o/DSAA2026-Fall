@@ -17,7 +17,9 @@ API_URL = "https://api.notion.com/v1"
 NOTION_VERSION = "2026-03-11"
 MANAGED_PREFIX = "AI C++ Notes | "
 COMPLETION_PREFIX = "SYNC_COMPLETE:"
-MARKER_RE = re.compile(r"\[cpp-sync:[0-9a-f]{16}\]")
+INDEX_TITLE = "📚 主题索引（按标签自动整理）"
+# Titles written before v4 of this tool ended with a hidden identity marker.
+LEGACY_MARKER_RE = re.compile(r"\s*\[cpp-sync:[0-9a-f]{16}\]\s*$")
 TEXT_CHUNK = 1800
 BLOCK_BATCH = 40
 MAX_BULLETS = 6
@@ -43,6 +45,28 @@ def block(kind: str, text: str) -> dict[str, Any]:
             kind: {"rich_text": rich_text(text)}}
 
 
+def page_mention(page_id: str) -> dict[str, Any]:
+    """Inline @page link; Notion renders the live page title."""
+    return {"type": "mention", "mention": {"type": "page", "page": {"id": page_id}}}
+
+
+def page_link_bullet(page_id: str) -> dict[str, Any]:
+    return {"object": "block", "type": "bulleted_list_item",
+            "bulleted_list_item": {"rich_text": [page_mention(page_id)]}}
+
+
+def plain_text(rich: list[dict[str, Any]]) -> str:
+    return "".join(item.get("plain_text", item.get("text", {}).get("content", ""))
+                   for item in rich)
+
+
+def mention_page_id(rich: list[dict[str, Any]]) -> str | None:
+    if len(rich) == 1 and rich[0].get("type") == "mention":
+        page = (rich[0].get("mention") or {}).get("page") or {}
+        return page.get("id")
+    return None
+
+
 def link_paragraph(label: str, url: str) -> dict[str, Any]:
     return {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [
         {"type": "text", "text": {"content": label, "link": {"url": url}}}
@@ -62,9 +86,12 @@ def generated_blocks(*, report: dict[str, Any], code: str, path: str,
     file_url = f"{repository_url}/blob/{commit}/{quote(path, safe='/')}"
     commit_url = f"{repository_url}/commit/{commit}"
     topic = " ".join(str(report.get("topic", "")).split())[:40]
+    tags = "、".join(str(t) for t in (report.get("tags") or []))
     meta = f"文件：{path}  |  仓库：{repo}  |  模型：{model}  |  提交：{commit[:12]}"
     if topic:
         meta = f"主题：{topic}  |  " + meta
+    if tags:
+        meta += f"  |  标签：{tags}"
     content: list[dict[str, Any]] = [
         block("paragraph", meta),
         link_paragraph("在 GitHub 查看此版本的源代码", file_url),
@@ -113,18 +140,26 @@ def file_key(repo: str, path: str) -> str:
 
 
 def page_marker(repo: str, path: str) -> str:
+    """Legacy identity marker; only used to find pages created before v4 titles."""
     return f"[cpp-sync:{file_key(repo, path)}]"
 
 
 def page_title(repo: str, path: str, topic: str = "") -> str:
     """Topic first so the Notion page list reads like a study index.
 
-    The trailing marker is the stable identity; the readable part may change.
+    No hidden marker: the title ends with the repository-relative path, which is
+    unique inside one parent page and survives AI re-wording of the topic.
     """
-    marker = page_marker(repo, path)
     topic = " ".join((topic or "").split())[:40]
-    readable = f"{topic} · {path[:120]}" if topic else path[:160]
-    return f"{readable} {marker}"
+    return f"{topic} · {path}" if topic else path
+
+
+def title_matches_path(title: str, path: str) -> bool:
+    return title == path or title.endswith("· " + path)
+
+
+def strip_marker(title: str) -> str:
+    return LEGACY_MARKER_RE.sub("", title).strip()
 
 
 class NotionClient:
@@ -176,31 +211,38 @@ class NotionClient:
             if not cursor:
                 raise RuntimeError("Notion pagination returned has_more without next_cursor")
 
-    def _index_parent_pages(self) -> dict[str, dict[str, str]]:
-        """Map the stable [cpp-sync:...] marker to the page, not the whole title.
+    def _index_parent_pages(self) -> list[dict[str, str]]:
+        """Child pages of the sync parent, title plus id.
 
-        Titles now start with an AI topic and can be re-worded, so matching on
-        the full title would create duplicate pages after every rename.
+        Identity is the "· <repository path>" suffix of the title, so re-worded
+        AI topics do not create duplicate pages. Pages written by older versions
+        still carry a [cpp-sync:...] marker and are matched through it once.
         """
         if self._pages is None:
-            pages: dict[str, dict[str, str]] = {}
-            for child in self.list_children(self.parent_id):
-                if child.get("type") == "child_page":
-                    title = child["child_page"]["title"]
-                    found = MARKER_RE.search(title)
-                    if found:
-                        pages[found.group(0)] = {"id": child["id"], "title": title}
-            self._pages = pages
+            self._pages = [
+                {"id": child["id"], "title": child["child_page"]["title"]}
+                for child in self.list_children(self.parent_id)
+                if child.get("type") == "child_page"
+            ]
         return self._pages
 
     def find_page(self, repo: str, path: str) -> str | None:
-        entry = self._index_parent_pages().get(page_marker(repo, path))
-        return entry["id"] if entry else None
+        pages = self._index_parent_pages()
+        for entry in pages:
+            if title_matches_path(entry["title"], path):
+                return entry["id"]
+        marker = page_marker(repo, path)
+        for entry in pages:
+            if marker in entry["title"]:
+                return entry["id"]
+        return None
 
     def _remember(self, title: str, page_id: str) -> None:
-        found = MARKER_RE.search(title)
-        if found:
-            self._index_parent_pages()[found.group(0)] = {"id": page_id, "title": title}
+        for entry in self._index_parent_pages():
+            if entry["id"] == page_id:
+                entry["title"] = title
+                return
+        self._index_parent_pages().append({"id": page_id, "title": title})
 
     def create_page(self, title: str) -> str:
         data = self._request("POST", "/pages", json={
@@ -210,9 +252,15 @@ class NotionClient:
         self._remember(title, data["id"])
         return data["id"]
 
+    def title_of(self, page_id: str) -> str:
+        for entry in self._index_parent_pages():
+            if entry["id"] == page_id:
+                return entry["title"]
+        return ""
+
     def set_title(self, page_id: str, title: str) -> bool:
-        """Rename only when the readable part actually changed."""
-        for entry in self._index_parent_pages().values():
+        """Rename only when the title actually changed."""
+        for entry in self._index_parent_pages():
             if entry["id"] == page_id and entry["title"] == title:
                 return False
         self._request("PATCH", f"/pages/{page_id}", json={
@@ -220,6 +268,66 @@ class NotionClient:
         })
         self._remember(title, page_id)
         return True
+
+    # ---- topic index at the bottom of the parent page -----------------
+    @staticmethod
+    def _index_block_kind(child: dict[str, Any], tags: set[str], page_ids: set[str]) -> bool:
+        """Only touch blocks this tool is known to have written."""
+        kind = child.get("type")
+        if kind == "heading_1":
+            return plain_text(child["heading_1"]["rich_text"]) == INDEX_TITLE
+        if kind == "heading_2":
+            return plain_text(child["heading_2"]["rich_text"]) in tags
+        if kind == "bulleted_list_item":
+            return mention_page_id(child["bulleted_list_item"]["rich_text"]) in page_ids
+        return False
+
+    def read_index(self) -> dict[str, list[str]]:
+        """Rebuild tag -> page ids from the index already on the parent page."""
+        index: dict[str, list[str]] = {}
+        tag: str | None = None
+        for child in self.list_children(self.parent_id):
+            kind = child.get("type")
+            if kind == "heading_1" and plain_text(child["heading_1"]["rich_text"]) == INDEX_TITLE:
+                tag = None
+            elif kind == "heading_2":
+                tag = plain_text(child["heading_2"]["rich_text"])
+                index.setdefault(tag, [])
+            elif kind == "bulleted_list_item" and tag:
+                page_id = mention_page_id(child["bulleted_list_item"]["rich_text"])
+                if page_id and page_id not in index[tag]:
+                    index[tag].append(page_id)
+        return index
+
+    @staticmethod
+    def record_index(index: dict[str, list[str]], page_id: str, tags: list[str]) -> None:
+        for pages in index.values():
+            if page_id in pages:
+                pages.remove(page_id)
+        for tag in tags:
+            bucket = index.setdefault(tag, [])
+            if page_id not in bucket:
+                bucket.append(page_id)
+
+    def write_index(self, index: dict[str, list[str]]) -> None:
+        """Recreate the tag index; anything else on the page is left alone."""
+        tags = set(index)
+        page_ids = {page for pages in index.values() for page in pages}
+        for child in self.list_children(self.parent_id):
+            if self._index_block_kind(child, tags, page_ids):
+                self._request("DELETE", f"/blocks/{child['id']}")
+        body: list[dict[str, Any]] = [{"object": "block", "type": "heading_1",
+                                       "heading_1": {"rich_text": rich_text(INDEX_TITLE)}}]
+        for tag in sorted(tag for tag, pages in index.items() if pages):
+            body.append({"object": "block", "type": "heading_2",
+                         "heading_2": {"rich_text": rich_text(tag)}})
+            body.extend(page_link_bullet(page_id) for page_id in index[tag])
+        if len(body) == 1:
+            return
+        for offset in range(0, len(body), BLOCK_BATCH):
+            self._request("PATCH", f"/blocks/{self.parent_id}/children", json={
+                "children": body[offset:offset + BLOCK_BATCH]
+            })
 
     def managed_toggles(self, page_id: str) -> list[dict[str, Any]]:
         output = []
