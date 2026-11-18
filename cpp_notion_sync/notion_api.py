@@ -18,6 +18,31 @@ NOTION_VERSION = "2026-03-11"
 MANAGED_PREFIX = "AI C++ Notes | "
 COMPLETION_PREFIX = "SYNC_COMPLETE:"
 INDEX_TITLE = "📚 主题索引（按标签自动整理）"
+
+# Decoration only: the stored tag is always the plain word, so indexes written
+# before/after this table stay compatible.
+TAG_EMOJI = {
+    "数组": "🧮", "链表": "🔗", "栈": "🥞", "队列": "🚏", "字符串": "🧵",
+    "哈希表": "🗂️", "树": "🌳", "二叉搜索树": "🌲", "堆": "⛰️", "图": "🕸️",
+    "并查集": "🤝", "排序": "🔀", "二分查找": "🎯", "递归": "🌀", "分治": "✂️",
+    "贪心": "🍬", "动态规划": "🧠", "回溯": "↩️", "搜索": "🔍", "数学": "📐",
+    "模拟": "🎭", "其他": "📦",
+}
+DEFAULT_TAG_EMOJI = "🏷️"
+
+
+def tag_label(tag: str) -> str:
+    """Display form used for the heading_2 in the topic index."""
+    return f"{TAG_EMOJI.get(tag, DEFAULT_TAG_EMOJI)} {tag}"
+
+
+def tag_of(label: str) -> str:
+    """Undo tag_label(); a leading symbol/emoji token is dropped."""
+    label = label.strip()
+    head, _, rest = label.partition(" ")
+    if rest and not re.search(r"[\w\u4e00-\u9fff]", head):
+        return rest.strip()
+    return label
 # Titles written before v4 of this tool ended with a hidden identity marker.
 LEGACY_MARKER_RE = re.compile(r"\s*\[cpp-sync:[0-9a-f]{16}\]\s*$")
 TEXT_CHUNK = 1800
@@ -277,7 +302,7 @@ class NotionClient:
         if kind == "heading_1":
             return plain_text(child["heading_1"]["rich_text"]) == INDEX_TITLE
         if kind == "heading_2":
-            return plain_text(child["heading_2"]["rich_text"]) in tags
+            return tag_of(plain_text(child["heading_2"]["rich_text"])) in tags
         if kind == "bulleted_list_item":
             return mention_page_id(child["bulleted_list_item"]["rich_text"]) in page_ids
         return False
@@ -291,7 +316,7 @@ class NotionClient:
             if kind == "heading_1" and plain_text(child["heading_1"]["rich_text"]) == INDEX_TITLE:
                 tag = None
             elif kind == "heading_2":
-                tag = plain_text(child["heading_2"]["rich_text"])
+                tag = tag_of(plain_text(child["heading_2"]["rich_text"]))
                 index.setdefault(tag, [])
             elif kind == "bulleted_list_item" and tag:
                 page_id = mention_page_id(child["bulleted_list_item"]["rich_text"])
@@ -320,7 +345,7 @@ class NotionClient:
                                        "heading_1": {"rich_text": rich_text(INDEX_TITLE)}}]
         for tag in sorted(tag for tag, pages in index.items() if pages):
             body.append({"object": "block", "type": "heading_2",
-                         "heading_2": {"rich_text": rich_text(tag)}})
+                         "heading_2": {"rich_text": rich_text(tag_label(tag))}})
             body.extend(page_link_bullet(page_id) for page_id in index[tag])
         if len(body) == 1:
             return
