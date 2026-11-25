@@ -87,11 +87,12 @@ void cpush(int x) {
 
 int main() {
     int t;
-    cin>>t;
+    // cin>>t;
+    t = 1;
     while (t--) {
         tot = 0;
-        int sum = 0;
-        int ans = 0;
+        long long sum = 0;
+        long long ans = 0;
         int nums;
         cin>>nums;
         for (int i = 1; i <= nums; i++) {
