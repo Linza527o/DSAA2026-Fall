@@ -1,81 +1,66 @@
-//
-// Created by Linza on 2026/11/23.
-//
 #include<iostream>
 #include<vector>
-#include<algorithm>
 using namespace std;
+#define MAXN 1000000 + 5
+int rootNode = 1;
+long long totalEnergy = 0;
+int at[MAXN]; //ACTIVATION THRESHOLD
+int stm[MAXN]; //SUBTREE MAX
+vector<int> adj[MAXN];
+void dfs(int node,int parent) {
+    int largestE = 0;
+    int secondlargestE = 0;
+    for (int c:adj[node]) {
+        if (c == parent) {
+            continue;
+        }
+        dfs(c,node);
+    }
+    for (int c:adj[node]) {
+        if ( c == parent) {
+            continue;
+        }
+        int cE = stm[c];
+        if (cE > largestE) {
+            secondlargestE = largestE;
+            largestE = cE;
+        }
+        else if (cE > secondlargestE) {
+            secondlargestE = cE;
+        }
+        // [cerr] cerr<<"now largest and second largest: "<<largestE<<" "<<secondlargestE<<endl;
+    }
 
-struct Node {
+    if (node == rootNode) {
+        totalEnergy += at[node] - secondlargestE;
+        totalEnergy += at[node] - largestE;
+    }
+    else {
+        totalEnergy += max(0, at[node] - largestE);
+        stm[node] = max(at[node],largestE);
 
-    int e;
-    int p;
-    int l; //layer
-    vector<Node*> nb;
-    Node* next;
-};
-
+    }
+}
 int main() {
-    int visited[200000] = {0};
-    int isLeaf[200000] = {0};
-    Node* lycnt[200000] = {};
-    int t = 0;
+    int t;
     cin>>t;
-    int pmax = 0;
-
-    Node* nodes[200000] ={};
-
-    for (int m = 0; m < t - 1; m++) {
-        t--;
+    int i = 0;
+    int maxAT = 0;
+    for (int k = 1;k<t;k++) {
         int a,b;
         cin>>a>>b;
-        if (nodes[a] == NULL) {
-            nodes[a] = new Node{0,0};
-        }
-        if (nodes[b] == NULL) {
-            nodes[b] = new Node{0,0};
-        }
-        nodes[a]->nb.push_back(nodes[b]);
-        nodes[b]->nb.push_back(nodes[a]);
+        adj[a].push_back(b);
+        adj[b].push_back(a);
+        // [cerr] cerr<<"connection confirmed "<<a<<" "<<b<<endl;
     }
-    for (int m = 0;m<t;m++) {
-        int tmp;
-        cin>>tmp;
-        nodes[m]->p = tmp;
-        if (nodes[m]->nb.size() == 1) {
-            isLeaf[m] = 1;
-            nodes[m]->e = nodes[m]->p;
-        }
-        pmax = max(pmax,nodes[m]->p);
-    }
-
-    //以上是读入，现在我们有了每一个节点之间的连接关系
-    //接下来要做的事情是 从最深处往上走
-
-    nodes[pmax]-> l = 0;
-
-    lycnt[0]++;
-    vector<Node*> q;
-    q.push_back(nodes[pmax]);
-    //先保留那个进队的逻辑
-
-    while (q.size()<t) {
-        for (Node* child: q.front()->nb) {
-            q.push_back(child);
-            if (lycnt[q.front()->l+1] == NULL) {
-                lycnt[q.front()->l+1] = child;
-            }
-            else{
-                lycnt[q.front()->l+1]->next = lycnt[q.front()->l+1]->next->next;
-                lycnt[q.front()->l+1]->next = child;
-            }
+    for(int k = 1;k<=t;k++) {
+        cin>>at[k];
+        maxAT = max(maxAT,at[k]);
+        if (maxAT == at[k]) {
+            rootNode = k;
+            // [cerr] cerr<<"rootNode is now "<<rootNode<<endl;
         }
     }
-
-
-
-
-
-
-
+    dfs(rootNode,0);
+    cout<<totalEnergy<<endl;
 }
